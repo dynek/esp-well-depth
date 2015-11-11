@@ -176,8 +176,8 @@ unsigned int get_depth (void) {
     if(accepted_probes_count > 0) return probes_total / accepted_probes_count;
   }
 
-  // in case something weird occurs, avoid division by 0 and return 0
-  return 0;
+  // in case something weird occurs, avoid division by 0 and return -1
+  return -1;
 }
 
 // setup program
