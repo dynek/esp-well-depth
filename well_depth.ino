@@ -180,6 +180,36 @@ unsigned int get_depth (void) {
   return -1;
 }
 
+void http_post(int depth){
+  // connect to web server
+  DEBUG_PRINT("connecting to ");
+  DEBUG_PRINTLN(WEB_HOST);
+
+  if(!client.connect(WEB_HOST, WEB_PORT)) {
+    DEBUG_PRINTLN("connection failed");  
+  } else {
+    DEBUG_PRINTLN("POSTing depth to remote server");  
+    
+    // construct data to post
+    char *post_data = (char *)malloc(10);
+    sprintf(post_data,"depth=%d", depth);
+
+    // post value to the server
+    client.print("POST "); client.print(WEB_PATH); client.println(" HTTP/1.1");
+    client.print("Host: "); client.println(WEB_HOST);
+    client.println("Content-Type: application/x-www-form-urlencoded");
+    client.print("Content-Length: ");
+    client.println(strlen(post_data));
+    client.println("Connection: close");
+    client.println();
+    client.println(post_data);
+    client.println();
+    delay(10);
+
+    DEBUG_PRINTLN("Done!");  
+  }
+}
+
 // setup program
 void setup(void) {
   #ifdef NDEBUG
@@ -208,48 +238,22 @@ void loop(void) {
     // get well depth
     boolean bFirst = true;
     unsigned int count = 1;
-    unsigned int depth = 0;
-    while(depth == 0 && count++ <= DEPTH_TIMEOUT) {
+    int depth = -1;
+    while(depth <= 0 && count++ <= DEPTH_TIMEOUT) {
       if(!bFirst) delay(DEPTH_WAIT);
       depth = get_depth();
       if(bFirst) bFirst = false;
     }
 
     // check if depth could be determined
-    if(depth == 0) {
+    if(depth <= 0) {
       DEBUG_PRINTLN("Could not determine depth!");
     } else {
       DEBUG_PRINT("Depth = ");
       DEBUG_PRINTLN(depth);
-    
-      // connect to web server
-      DEBUG_PRINT("connecting to ");
-      DEBUG_PRINTLN(WEB_HOST);
-   
-      if(!client.connect(WEB_HOST, WEB_PORT)) {
-        DEBUG_PRINTLN("connection failed");  
-      } else {
-        DEBUG_PRINTLN("POSTing depth to remote server");  
-        
-        // construct data to post
-        char *post_data = (char *)malloc(10);
-        sprintf(post_data,"depth=%d", depth);
-    
-        // post value to the server
-        client.print("POST "); client.print(WEB_PATH); client.println(" HTTP/1.1");
-        client.print("Host: "); client.println(WEB_HOST);
-        client.println("Content-Type: application/x-www-form-urlencoded");
-        client.print("Content-Length: ");
-        client.println(strlen(post_data));
-        client.println("Connection: close");
-        client.println();
-        client.println(post_data);
-        client.println();
-        delay(10);
-
-        DEBUG_PRINTLN("Done!");  
-      }
     }
+
+    http_post(depth);
 
     WiFi.disconnect();
     DEBUG_PRINTLN("disconnected from AP");
