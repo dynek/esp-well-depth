@@ -22,7 +22,8 @@
 #include <ESP8266WiFi.h>
 
 // clock watcher
-#define SLEEP_INTERVAL 3774000000 // = ~1 hour (microseconds)
+#define MAX_SLEEP_INTERVAL 4000000000
+#define REGULAR_SLEEP_INTERVAL 3788666668 // = ~1 hour (microseconds)
 
 // wifi network
 #define WIFI_SSID      "SSID"
@@ -50,6 +51,8 @@
 
 // Use WiFiClient class to create TCP connections
 WiFiClient client;
+#define BUFFER_SIZE 64 // biggest line in http answer
+#define SMALLEST_LENGTH 8 // smallest value
 
 // initiate wifi link
 unsigned int initiate_wifi_link(void) {
@@ -100,7 +103,7 @@ unsigned int get_distance(void) {
 }
 
 // get an (as accurate as possible) depth
-unsigned int get_depth (void) {
+int get_depth (void) {
   DEBUG_PRINTLN("entering get_depth");
   
   // array to hold probes
@@ -180,7 +183,7 @@ unsigned int get_depth (void) {
   return -1;
 }
 
-void http_post(int depth){
+unsigned int http_post(int depth){
   // connect to web server
   DEBUG_PRINT("connecting to ");
   DEBUG_PRINTLN(WEB_HOST);
@@ -204,10 +207,53 @@ void http_post(int depth){
     client.println();
     client.println(post_data);
     client.println();
-    delay(10);
+    delay(100);
 
-    DEBUG_PRINTLN("Done!");  
+    DEBUG_PRINTLN("Done - Now reading next sleep interval");
+
+    // read returned sleep interval
+    char character, buffer[BUFFER_SIZE] = {0};
+    int loop=0;
+    boolean is_payload=false;
+    // while data coming in
+    while(client.available() > 0) {
+      // "line" longer than buffer ?
+      if(loop >= BUFFER_SIZE) {
+        DEBUG_PRINTLN("buffer too small for data");
+        //return 0;
+      }
+
+      // read char
+      character = client.read();
+
+      // do we care about \r ?
+      if(character == '\r') { continue; }
+
+      // append char
+      if(character != '\n') { buffer[loop++] = character; continue; } // continue, because we don't want to lose processing time
+
+      // end buffer upon new line
+      if(character == '\n' && strlen(buffer) > 0) { buffer[loop] = '\0'; }
+      
+      // detect payload
+      if(character == '\n' && strlen(buffer) == 0) {
+        DEBUG_PRINTLN("HTTP payload coming...");
+        is_payload=true;
+        continue; // no need to keep going
+      }
+
+      // if not yet payload, continue (also workaround payload containing length of lines, as we don't care)
+      if(!is_payload || (is_payload && strlen(buffer) < SMALLEST_LENGTH)) { buffer[BUFFER_SIZE] = {0}; loop=0; continue; } // reset
+
+      // display payload
+      if(buffer[loop] == '\0') {
+        DEBUG_PRINT("Sleep interval returned by server: "); DEBUG_PRINTLN(buffer);
+        return (unsigned int)strtoul(buffer, NULL, 0); // char to unsigned int
+      } 
+    }
   }
+
+  return 0;
 }
 
 // setup program
@@ -230,7 +276,10 @@ void setup(void) {
 }
 
 // well ... loop
-void loop(void) {
+void loop(void) {   
+  // sleep interval
+  unsigned int sleep_interval=0;
+  
   // initiate wifi link
   if(!initiate_wifi_link()) {
     DEBUG_PRINTLN("WIFI NOT OK");
@@ -253,7 +302,8 @@ void loop(void) {
       DEBUG_PRINTLN(depth);
     }
 
-    http_post(depth);
+    // post depth and fetch next sleep interval
+    sleep_interval = http_post(depth);
 
     WiFi.disconnect();
     DEBUG_PRINTLN("disconnected from AP");
@@ -264,8 +314,12 @@ void loop(void) {
   DEBUG_PRINTLN("WiFi off");
 
   // sleep
-  DEBUG_PRINTLN("now deep sleep for 1 hour");
-  unsigned int sleeptime = SLEEP_INTERVAL - micros();
-  ESP.deepSleep(sleeptime, WAKE_NO_RFCAL);
+  if(sleep_interval <= 0 || sleep_interval > MAX_SLEEP_INTERVAL) {
+    DEBUG_PRINTLN("Invalid sleep interval. Using default value");
+    sleep_interval = REGULAR_SLEEP_INTERVAL;
+  }
+  if(micros() < sleep_interval) { sleep_interval -= micros(); }
+  DEBUG_PRINT("now deep sleep for "); DEBUG_PRINTLN(sleep_interval);
+  ESP.deepSleep(sleep_interval, WAKE_NO_RFCAL);
   delay(500); // wait deep sleep
 }
