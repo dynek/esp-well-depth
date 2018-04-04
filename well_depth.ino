@@ -1,10 +1,13 @@
 //
 // what: probe bottom of well and post depth to some web server
 // author: Pierrick Brossin <github@bs-network.net>
-// version: 0.1
-// hardware: ESP8266 (ESP-07), one US-100 (Ultrasonic Sensor)
+// version: 1.0
+// hardware: ESP8266 (ESP-07), one JSN-SR04T v1 (Ultrasonic Sensor)
 // software: this code and the other side is an http server (POST depth and graph them)
-// monitoring: could be a good idea
+// monitoring / alerting: still to be taken care of
+//
+// thanks to this guy for the third mandatory watchdog:
+// https://sigmdel.ca/michel/program/esp8266/arduino/watchdogs2_en.html
 //
 // why NDEBUG: http://stackoverflow.com/questions/5473556/what-is-the-ndebug-preprocessor-macro-used-for-on-different-platforms
 
@@ -20,10 +23,11 @@
 
 // include libraries
 #include <ESP8266WiFi.h>
+#include <Ticker.h>
 
 // clock watcher
-#define MAX_SLEEP_INTERVAL 4000000000
-#define REGULAR_SLEEP_INTERVAL 3788666668 // = ~1 hour (microseconds)
+#define LWD_TIMEOUT  15*1000  // Reboot if loop watchdog timer reaches this time out value
+#define SLEEP_INTERVAL 3.6e+9 // = ~1 hour (microseconds)
 
 // wifi network
 #define WIFI_SSID      "SSID"
@@ -37,10 +41,10 @@
 #define WEB_PATH  "/probe.php"
 #define WEB_VALUE "depth"
 
-// ultrasonic us-100
-#define TRIGGER_PIN            4 // pin to trigger of us-100
-#define ECHO_PIN               5 // pin to echo of us-100
-#define POWER_PIN             12 // pin to power us-100
+// ultrasonic sensor
+#define TRIGGER_PIN            4 // pin to trigger of ultrasonic sensor
+#define ECHO_PIN               5 // pin to echo of ultrasonic sensor
+#define POWER_PIN             13 // pin to power ultrasonic sensor
 #define PROBE_ARRAY_SIZE       5 // number of probes
 #define MIN_WELL_DEPTH        10 // minimum well depth to avoid inaccurate values
 #define MAX_WELL_DEPTH       250 // maximum well depth to avoid inaccurate values
@@ -51,23 +55,47 @@
 
 // Use WiFiClient class to create TCP connections
 WiFiClient client;
-#define BUFFER_SIZE 64 // biggest line in http answer
-#define SMALLEST_LENGTH 8 // smallest value
+
+// Elapsed time / Ticker
+unsigned long lwdTime = 0;
+Ticker lwdTicker;
+
+// Returns the number of milliseconds elapsed since  start_time_ms
+unsigned long elapsed_time(unsigned long start_time_ms) {
+  return millis() - start_time_ms;
+}
+
+// lwdTicker interrupt service routine (ISR)
+void ICACHE_RAM_ATTR lwdtISR(void) {
+  if (elapsed_time(lwdTime) > LWD_TIMEOUT) {
+    ESP.restart();
+  }
+}
 
 // initiate wifi link
 unsigned int initiate_wifi_link(void) {
-  // let's connect to wifi network from scratch
-  DEBUG_PRINTLN("clear wifi setup");
-  WiFi.disconnect();
-  DEBUG_PRINTLN("set esp8266 as station");
-  WiFi.mode(WIFI_STA);
-  DEBUG_PRINT("initiate wifi connection: "); 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // check stored SSID
+  if (WiFi.SSID() != WIFI_SSID) {
+    DEBUG_PRINTLN("setup wifi from scratch");
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    WiFi.hostname("esp-well-depth");
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  } else {
+    DEBUG_PRINTLN("using existing wifi config");
+    WiFi.begin();
+  }
+
   // wait for link to be established
+  DEBUG_PRINT("initiate wifi connection: ");
   unsigned int counter = 0;
   while (WiFi.status() != WL_CONNECTED) {
+    // feed loop watchdog (restart timeout timer)
+    lwdTime = millis();
+
     // timeout
     if(counter++ == WIFI_TIMEOUT) {
+      DEBUG_PRINTLN("reset wifi config");
       WiFi.disconnect();
       return false;
     }
@@ -77,6 +105,7 @@ unsigned int initiate_wifi_link(void) {
   DEBUG_PRINTLN("");
   DEBUG_PRINT("wifi connected: ");
   DEBUG_PRINTLN(WiFi.localIP());
+
   // successfully connected
   return true;
 }
@@ -84,20 +113,20 @@ unsigned int initiate_wifi_link(void) {
 // send pulse, fetch echo and return value
 unsigned int get_distance(void) {
   DEBUG_PRINTLN("entering get_distance");
-  
+
   // send pulse
   digitalWrite(TRIGGER_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIGGER_PIN, HIGH);
   delayMicroseconds(50);
   digitalWrite(TRIGGER_PIN, LOW);
-  
+
   // read echo
   unsigned long echo_value = pulseIn(ECHO_PIN, HIGH);
 
   DEBUG_PRINT("raw echo: ");
   DEBUG_PRINTLN(echo_value);
-  
+
   // return length in cm
   return echo_value / 29.1 / 2;
 }
@@ -105,13 +134,13 @@ unsigned int get_distance(void) {
 // get an (as accurate as possible) depth
 int get_depth (void) {
   DEBUG_PRINTLN("entering get_depth");
-  
+
   // array to hold probes
   unsigned int probes[PROBE_ARRAY_SIZE] = { 0 };
 
   // power ultrasonic sensor
   digitalWrite(POWER_PIN, HIGH);
-  delay(1000);
+  delay(500);
 
   unsigned int i = 0;
   unsigned int probes_total = 0;
@@ -183,16 +212,16 @@ int get_depth (void) {
   return -1;
 }
 
-unsigned int http_post(int depth){
+void http_post(int depth){
   // connect to web server
   DEBUG_PRINT("connecting to ");
   DEBUG_PRINTLN(WEB_HOST);
 
   if(!client.connect(WEB_HOST, WEB_PORT)) {
-    DEBUG_PRINTLN("connection failed");  
+    DEBUG_PRINTLN("connection failed");
   } else {
-    DEBUG_PRINTLN("POSTing depth to remote server");  
-    
+    DEBUG_PRINTLN("POSTing depth to remote server");
+
     // construct data to post
     char *post_data = (char *)malloc(10);
     sprintf(post_data,"depth=%d", depth);
@@ -208,78 +237,39 @@ unsigned int http_post(int depth){
     client.println(post_data);
     client.println();
     delay(100);
-
-    DEBUG_PRINTLN("Done - Now reading next sleep interval");
-
-    // read returned sleep interval
-    char character, buffer[BUFFER_SIZE] = {0};
-    int loop=0;
-    boolean is_payload=false;
-    // while data coming in
-    while(client.available() > 0) {
-      // "line" longer than buffer ?
-      if(loop >= BUFFER_SIZE) {
-        DEBUG_PRINTLN("buffer too small for data");
-        //return 0;
-      }
-
-      // read char
-      character = client.read();
-
-      // do we care about \r ?
-      if(character == '\r') { continue; }
-
-      // append char
-      if(character != '\n') { buffer[loop++] = character; continue; } // continue, because we don't want to lose processing time
-
-      // end buffer upon new line
-      if(character == '\n' && strlen(buffer) > 0) { buffer[loop] = '\0'; }
-      
-      // detect payload
-      if(character == '\n' && strlen(buffer) == 0) {
-        DEBUG_PRINTLN("HTTP payload coming...");
-        is_payload=true;
-        continue; // no need to keep going
-      }
-
-      // if not yet payload, continue (also workaround payload containing length of lines, as we don't care)
-      if(!is_payload || (is_payload && strlen(buffer) < SMALLEST_LENGTH)) { buffer[BUFFER_SIZE] = {0}; loop=0; continue; } // reset
-
-      // display payload
-      if(buffer[loop] == '\0') {
-        DEBUG_PRINT("Sleep interval returned by server: "); DEBUG_PRINTLN(buffer);
-        return (unsigned int)strtoul(buffer, NULL, 0); // char to unsigned int
-      } 
-    }
   }
-
-  return 0;
 }
 
 // setup program
 void setup(void) {
+  lwdTime = millis(); // to determine elapsed time
+  lwdTicker.attach_ms(1000, lwdtISR); // attach lwdt interrupt service routine to ticker
+
   #ifdef NDEBUG
-    // hold on for 1 sec so Serial Monitor can be opened
-    delay(1000);
     // start serial communication
     Serial.begin(115200);
   #endif
 
-  // setup OK
-  DEBUG_PRINTLN("configure ultrasonic us-100");
+  DEBUG_PRINTLN("configure ultrasonic sensor");
   pinMode(POWER_PIN, OUTPUT);
+  digitalWrite(POWER_PIN, LOW);
   pinMode(TRIGGER_PIN, OUTPUT);
+  digitalWrite(TRIGGER_PIN, LOW);
   pinMode(ECHO_PIN, INPUT);
+  delay(500);
 
-  // setup OK
+  // done
   DEBUG_PRINTLN("setup done!");
 }
 
 // well ... loop
-void loop(void) {   
+void loop(void) {
+  // feed loop watchdog (restart timeout timer)
+  lwdTime = millis();
+
   // sleep interval
   unsigned int sleep_interval=0;
-  
+
   // initiate wifi link
   if(!initiate_wifi_link()) {
     DEBUG_PRINTLN("WIFI NOT OK");
@@ -302,24 +292,12 @@ void loop(void) {
       DEBUG_PRINTLN(depth);
     }
 
-    // post depth and fetch next sleep interval
-    sleep_interval = http_post(depth);
-
-    WiFi.disconnect();
-    DEBUG_PRINTLN("disconnected from AP");
+    // post depth
+    http_post(depth);
   }
 
-  // turn off wifi
-  WiFi.mode(WIFI_OFF);
-  DEBUG_PRINTLN("WiFi off");
-
-  // sleep
-  if(sleep_interval <= 0 || sleep_interval > MAX_SLEEP_INTERVAL) {
-    DEBUG_PRINTLN("Invalid sleep interval. Using default value");
-    sleep_interval = REGULAR_SLEEP_INTERVAL;
-  }
-  if(micros() < sleep_interval) { sleep_interval -= micros(); }
-  DEBUG_PRINT("now deep sleep for "); DEBUG_PRINTLN(sleep_interval);
-  ESP.deepSleep(sleep_interval, WAKE_NO_RFCAL);
+  // deep sleep
+  DEBUG_PRINT("going into deep sleep");
+  ESP.deepSleep(SLEEP_INTERVAL);
   delay(500); // wait deep sleep
 }
