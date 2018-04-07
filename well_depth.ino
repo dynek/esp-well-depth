@@ -11,6 +11,9 @@
 //
 // why NDEBUG: http://stackoverflow.com/questions/5473556/what-is-the-ndebug-preprocessor-macro-used-for-on-different-platforms
 
+// ADC to read VDD
+ADC_MODE(ADC_VCC);
+
 // debug
 #define NDEBUG // comment line to disable debugging
 #ifdef NDEBUG
@@ -212,7 +215,7 @@ int get_depth (void) {
   return -1;
 }
 
-void http_post(int depth){
+void http_post(int depth, float vcc){
   // connect to web server
   DEBUG_PRINT("connecting to ");
   DEBUG_PRINTLN(WEB_HOST);
@@ -223,8 +226,8 @@ void http_post(int depth){
     DEBUG_PRINTLN("POSTing depth to remote server");
 
     // construct data to post
-    char *post_data = (char *)malloc(10);
-    sprintf(post_data,"depth=%d", depth);
+    char *post_data = (char *)malloc(32);
+    sprintf(post_data,"depth=%d&vcc=%f", depth, vcc);
 
     // post value to the server
     client.print("POST "); client.print(WEB_PATH); client.println(" HTTP/1.1");
@@ -292,8 +295,11 @@ void loop(void) {
       DEBUG_PRINTLN(depth);
     }
 
+    // read VCC
+    float vcc = (float)ESP.getVcc()/1024.0;
+
     // post depth
-    http_post(depth);
+    http_post(depth, vcc);
   }
 
   // deep sleep
